@@ -13,16 +13,19 @@
 #include <vector>
 #include <thread>
 
+#include <ringbuffer.h>
+
 void usageAndExit() {
   printf("Usage: server -t <port list>\n\n");
   printf("where:\n\n");
-  printf("   -t <port-list> run new thread listening to ports in list. repeat as needed\n");
-  printf("                  <port-list> is a ':' seperated integer ports > 1024\n");
+  printf("   -t <port-list> run new thread listening for client connect on por list\n");
+  printf("                  <port-list> is a ':' delimited integer > 1024 list\n");
   printf("                  each thread is pinned to a distinct CPU\n");
-  printf("   -v             print payloads received\n\n");
-  printf("Server threads listen for packets containing only a single signed 32-bit sequence.\n");
-  printf("The connection is closed whenever a value < 0 is seen.\n\n");
-  printf("Warning: code does check for duplicate ports\n");
+  printf("   -v             print payloads received. repeat as needed\n\n");
+  printf("Server threads listen for packets containing a one signed 32-bit integer.\n");
+  printf("The connection is closed whenever a value < 0 is encountered.\n");
+  printf("No responses are produced.\n\n");
+  printf("Warning: code does not check for duplicate ports\n");
   exit(2);
 }
 
@@ -57,16 +60,7 @@ void parseCommandLines(int argc, char **argv, std::vector<std::vector<int>> *por
   }
 }
 
-void eventLoop(int epolFid, int epioFid, const std::vector<int>& fid) {
-  const int k_EVENT_MAX = 10;
-  struct epoll_event ev[k_EVENT_MAX];
-
-  while(1) {
-    int eventCount = epoll_wait(epolFid, ev, k_EVENT_MAX, -1);
-  }
-}
-
-void serverSetup(const std::vector<int>& portList, const int cpu) {
+int pinThread(int cpu) {
   cpu_set_t mask;
   CPU_ZERO(&mask);
   CPU_SET(cpu, &mask);
@@ -74,6 +68,31 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
   // Pin thread to CPU
   if (sched_setaffinity(0, sizeof(cpu_set_t), &mask) == -1) {
     fprintf(stderr, "invalid CPU %d: %s\n", cpu, strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
+void readEventLoop(int cpu, int eprdFid, unsigned connectionCout, RingBuffer::SPSC& ringBuffer) {
+  return;
+}
+
+void listenEventLoop(int epolFid, const std::vector<int>& fid, RingBuffer::SPSC& ringBuffer) {
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+
+    if (epoll_ctl(epolFid, EPOLL_CTL_ADD, fd, &ev) == -1) {
+      fprintf(stderr, "CPU %d unable to add port %d to listener epoll: %s\n", cpu, portList[i], strerror(errno));
+      return;
+    }
+  return;
+}
+
+void serverSetup(const std::vector<int>& portList, const int cpu) {
+  // Pin this thread to 'cpu'
+  if (pinThread(cpu)!=0) {
     return;
   }
 
@@ -85,14 +104,13 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
   }
 
   // Create epoll descriptor for reading
-  int epioFid = epoll_create1(0);
-  if (epioFid == -1) {
+  int eprdFid = epoll_create1(0);
+  if (eprdFid == -1) {
     fprintf(stderr, "CPU %d: failed to make reader descriptor: %s\n", cpu, strerror(errno));
     return;
   }
 
   std::vector<int> fid;
-  std::vector<struct sockaddr_in> socketAddr;
 
   for (unsigned i=0; i<portList.size(); ++i) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -116,22 +134,31 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
       return;
     }
 
-    socketAddr.push_back(sock);
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = fd;
-
-    if (epoll_ctl(epolFid, EPOLL_CTL_ADD, fd, &ev) == -1) {
-      fprintf(stderr, "CPU %d unable to add port %d to listener epoll: %s\n", cpu, portList[i], strerror(errno));
-      return;
-    }
-
     printf("CPU %02d socket for port %d created\n", cpu, portList[i]);
   }
 
-  // We're setup: hand off to event loop
-  eventLoop(epolFid, epioFid, fid);
+  // Start a reader thread on 'cpu' handling at most 'fid.size()' ports. As
+  // connections are made in the listener (below), those fids are transferred
+  // to this reader over a SPCP ringbuffer
+  RingBuffer::SPSC ringbuffer;
+  std::thread readThread(readEventLoop, cpu, eprdFid, fid.size(), std::ref(ringbuffer));
+
+  // Run listener event loop on this thread. As connections made, they are
+  // are transferred to reader (above) over SPSC queue. And once all the
+  // connections are made, the listener returns
+  listenEventLoop(epolFid, std::ref(fid), std::ref(ringbuffer));
+  // Close listener's epoll fid
+  close(epolFid);
+
+  // Join with reader thread
+  readThread.join()
+  // Close reader's epoll fid
+  close(eprdFid);
+
+  // Cleanup socket fids
+  for (unsigned i=0; i<fid.size(); ++i) {
+    close(fid[i]);
+  }
 }
   
 int main(int argc, char **argv) {
