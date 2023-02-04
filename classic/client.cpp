@@ -3,13 +3,20 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <sched.h>
+#include <netdb.h>
+#include <errno.h>
 #include <sys/epoll.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 #include <string>
 #include <vector>
 #include <thread>
 
-int max = 10;
+int max = 2;
+int verbose = 0;
 std::vector<int> portPerThread;
 std::vector<std::string> ipAddrPerThread;
 
@@ -55,8 +62,8 @@ void parseCommandLines(int argc, char **argv) {
       case 'N':
       {
         int val = atoi(optarg);
-        if (val<=1024) {
-          printf("invalid port %d\n", val);
+        if (val<=0) {
+          printf("invalid max %d\n", val);
           usageAndExit();
         }
         max = val;
@@ -68,10 +75,12 @@ void parseCommandLines(int argc, char **argv) {
         break;
       }
       default:
+      {
         usageAndExit();
+      }
     }
   }
-  if (portsPerThread->empty()) {
+  if (portPerThread.empty()) {
     usageAndExit();
   }
 }
@@ -105,21 +114,21 @@ void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
   }
 
   // Attempt to connect to server
-  int rc = connect(fd, &addr, sizeof(addr));
-  {
+  int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+  if (rc==-1) {
     printf("CPU %02d connect to '%s:%d' failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
     return;
   } 
 
   if (verbose) {
-    printf("CPU %02d IP address connected to '%s:%d'\n", cpu, ipAddr.c_str(), port);
+    printf("CPU %02d connected to '%s:%d'\n", cpu, ipAddr.c_str(), port);
   }
 
   // send max integers
   int sequence(0);
   while (++sequence<=max) {
     rc = write(fd, &sequence, sizeof(sequence)); 
-    if (rc<=0) {
+    if (rc!=sizeof(sequence)) {
       printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
     } else if (verbose) {
       printf("CPU %02d '%s:%d' sent %d\n", cpu, ipAddr.c_str(), port, sequence);
@@ -129,7 +138,7 @@ void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
   // Send -1 so server closes connection
   sequence = -1;
   rc = write(fd, &sequence, sizeof(sequence)); 
-  if (rc<=0) {
+  if (rc!=sizeof(sequence)) {
     printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
   }
 
@@ -141,8 +150,9 @@ int main(int argc, char **argv) {
   parseCommandLines(argc, argv);
 
   // Run threads pinned to CPU 'i'
+  std::vector<std::thread> thread;
   for (unsigned i=0; i<portPerThread.size(); ++i) {
-    thread.push_back(std::thread(entryPoint, portPerThread[i], i));
+    thread.push_back(std::thread(entryPoint, std::ref(ipAddrPerThread[i]), portPerThread[i], i));
   }
 
   // Wait for threads to stop

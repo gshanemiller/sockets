@@ -102,7 +102,7 @@ int pinThread(int cpu) {
   return 0;
 }
 
-void readEventLoop(int cpu, int eprdFid, unsigned connectionCount, RingBuffer::SPSC& ringBuffer) {
+void readEventLoop(int cpu, int eprdFid, const unsigned connectionCount, RingBuffer::SPSC& ringBuffer) {
   // Pin this thread to 'cpu'
   if (pinThread(cpu)!=0) {
     return;
@@ -118,21 +118,28 @@ void readEventLoop(int cpu, int eprdFid, unsigned connectionCount, RingBuffer::S
   // Return result of read call
   int readRc;
 
-  while(1) {
+  // The number of connections made and closed by client
+  unsigned closedConnections = 0;
+  // The number of possible remaining connections
+  unsigned remainingConnections = connectionCount;
+
+  // Run read event loop until all connections answered and closed
+  while(closedConnections!=connectionCount) {
     // Check if new connections are possible
-    if (connectionCount) {
+    if (remainingConnections) {
       int newFid;
       if (ringBuffer.read(&newFid)) {
         if (newFid==-1) {
           // -1 mean listener stopped; no more connections are possible
-          connectionCount = 0; 
+          closedConnections += remainingConnections;
+          remainingConnections = 0; 
           continue;
         }
         
         // Got a new connection: decrement connections possible
-        --connectionCount; 
+        --remainingConnections; 
         if (verbose) {
-          printf("CPU %02d connection received for fid %d with %d new connections possible\n", cpu, newFid, connectionCount);
+          printf("CPU %02d connection received for fid %d with %d new connections remaining\n", cpu, newFid, remainingConnections);
         }
 
         // Make socket non-blocking
@@ -155,16 +162,22 @@ void readEventLoop(int cpu, int eprdFid, unsigned connectionCount, RingBuffer::S
     } 
 
     // process read ready events; count==0 --> timeout
+    int sequence;
     for (int i=0; i<count; ++i) {
       if (event[i].events!=0) {
-        char buf[5];
-        buf[4] = 0;
-        readRc = read(event[i].data.fd, buf, 4);
-        if (readRc<0) {
+        readRc = read(event[i].data.fd, &sequence, sizeof(sequence));
+        if (readRc!=sizeof(sequence)) {
           printf("CPU %02d read error on fid %d: %s\n", cpu, event[i].data.fd, strerror(errno));
         }
-        if (verbose) {
-          printf("CPU %02d read '%s'\n", cpu, buf);
+        if (verbose && sequence>=0) {
+          printf("CPU %02d read %d\n", cpu, sequence);
+        }
+        // Is sequence last message sent by client? Then remove fid from epoll
+        if (sequence<0) {
+          ++closedConnections;
+          if (epoll_ctl(eprdFid, EPOLL_CTL_DEL, event[i].data.fd, event+i) == -1) {
+            printf("CPU %02d unable to remove poll for read ready fid %d: %s\n", cpu, event[i].data.fd, strerror(errno));
+          }
         }
       }
     }
