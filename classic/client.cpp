@@ -5,19 +5,22 @@
 #include <sched.h>
 #include <sys/epoll.h>
 
+#include <string>
 #include <vector>
 #include <thread>
 
 int max = 10;
 std::vector<int> portPerThread;
+std::vector<std::string> ipAddrPerThread;
 
 void usageAndExit() {
   printf("Usage: client -t <port>\n\n");
   printf("where:\n\n");
 
-  printf("   -t <port>      run new thread sending data to local port <port>\n");
-  printf("                  which must be > 1024. see -N. thread is pinned to\n");
-  printf("                  distinct CPU. repeat as needed\n");
+  printf("   -t <ip>:<port> run thread sending data to <ip>:<port> where\n");
+  printf("                  port>1024. thread is pinned to distinct CPU.\n");
+  printf("                  <ip> should be in xx.xx.xx.xx format. repeat\n");
+  printf("                  -t as needed. see -N.\n");
   
   printf("   -N <max>       send max>0 integers sequenced [0..max) to server\n");
   printf("                  default %d\n", max);
@@ -35,13 +38,18 @@ void parseCommandLines(int argc, char **argv) {
     switch(c) {
       case 't':
       {
-        int port = atoi(optarg);
-        if (port<=1024) {
-          fprintf(stderr, "port %d invalid\n", port);
-          usageAndExit();
-        } else {
-          portPerThread.push_back(port);
+        char *del = strchr(optarg, ':');
+        if (del!=0 && del!=optarg) {
+          int port = atoi(del+1);
+          if (port>1024) {
+            portPerThread.push_back(port);
+            *del = 0;
+            ipAddrPerThread.push_back(optarg);
+            break;
+          }
         }
+        printf("invalid port or ip address '%s'\n", optarg);
+        usageAndExit();
         break;
       }
       case 'N':
@@ -68,7 +76,7 @@ void parseCommandLines(int argc, char **argv) {
   }
 }
 
-void entryPoint(const int port, const int cpu) {
+void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
   cpu_set_t mask;
   CPU_ZERO(&mask);
   CPU_SET(cpu, &mask);
@@ -85,21 +93,48 @@ void entryPoint(const int port, const int cpu) {
     return;
   }
 
-  // Connect to server
-  struct sockaddr addr;
-  memset(&addr, sizeof(addr), 0);
-  addr.sun_family = AF_UNIX;
-  sprintf(addr.sun_path, "/tmp/client_cpu%d_port%d.socket", cpu, port);
-  unlink(addr.sun_path);
+  // Setup IP address to connect to
+  struct sockaddr_in addr; 
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port); 
+  if (inet_pton(AF_INET, ipAddr.c_str(), &addr.sin_addr)<=0)
+  {
+    printf("CPU %02d IP address '%s' invalid: %s\n", cpu, ipAddr.c_str(), strerror(errno));
+    return;
+  }
 
-  if (connect(fd, &addr, strlen(addr.sun_path) + sizeof(addr.sun_family)) == -1) {
-        perror("connect");
-        exit(1);
-  
-  
-  
- 
-  printf("CPU %02d client running for port %d\n", cpu, port);
+  // Attempt to connect to server
+  int rc = connect(fd, &addr, sizeof(addr));
+  {
+    printf("CPU %02d connect to '%s:%d' failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
+    return;
+  } 
+
+  if (verbose) {
+    printf("CPU %02d IP address connected to '%s:%d'\n", cpu, ipAddr.c_str(), port);
+  }
+
+  // send max integers
+  int sequence(0);
+  while (++sequence<=max) {
+    rc = write(fd, &sequence, sizeof(sequence)); 
+    if (rc<=0) {
+      printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
+    } else if (verbose) {
+      printf("CPU %02d '%s:%d' sent %d\n", cpu, ipAddr.c_str(), port, sequence);
+    }
+  }
+
+  // Send -1 so server closes connection
+  sequence = -1;
+  rc = write(fd, &sequence, sizeof(sequence)); 
+  if (rc<=0) {
+    printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
+  }
+
+  // Close socket
+  close(fd);
 }
   
 int main(int argc, char **argv) {
