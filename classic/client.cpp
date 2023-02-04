@@ -77,7 +77,28 @@ void entryPoint(const int port, const int cpu) {
     printf("CPU %02d invalid\n", cpu);
     return;
   }
+
+  // Create a socket to send data on
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd==-1) {
+    printf("CPU %02d unable to create socket: %s\n", cpu, strerror(errno));
+    return;
+  }
+
+  // Connect to server
+  struct sockaddr addr;
+  memset(&addr, sizeof(addr), 0);
+  addr.sun_family = AF_UNIX;
+  sprintf(addr.sun_path, "/tmp/client_cpu%d_port%d.socket", cpu, port);
+  unlink(addr.sun_path);
+
+  if (connect(fd, &addr, strlen(addr.sun_path) + sizeof(addr.sun_family)) == -1) {
+        perror("connect");
+        exit(1);
   
+  
+  
+ 
   printf("CPU %02d client running for port %d\n", cpu, port);
 }
   
