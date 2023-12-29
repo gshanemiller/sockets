@@ -9,44 +9,67 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #include <vector>
+#include <string>
 #include <thread>
 
 #include <ringbuffer.h>
 
 int verbose = 0;
-int listenTimeoutMs = 10000;
+struct ifreq ifr;
+std::string linkName;
+int listenTimeoutMs = 60000;
 std::vector<std::vector<int>> portsPerThread;
 
 void usageAndExit() {
-  printf("Usage: server -t <portList> -T <timeout> [-v]\n\n");
+  printf("Accept TCP connect requests then echo all data received to stdout.\n\n");
+
+  printf("usage: server -l <name> -t <portList> [-T <timeout> -v]\n\n");
 
   printf("where:\n\n");
+
+  printf("   -l <linkName>  listen for packets only on named <linkName>\n");
+  printf("                  run 'ip link show' or 'ifconfig' for choices\n"); 
 
   printf("   -t <port-list> run new thread listening for client connect on ports\n");
   printf("                  then read packets containing only integers. list is\n");
   printf("                  ':' delimited integers > 1024. each thread is pinned\n");
-  printf("                  to a distinct CPU. reading a port stops when an integer\n");
-  printf("                  is less than zero is read. repeat '-t' as needed\n");
+  printf("                  to a distinct CPU. repeat -t to add more threads w/ports\n");
 
   printf("   -T <timeout>   the listener waits for at most <timeout> milliseconds for\n");
   printf("                  connect requests. Specify a value>0. default %d\n", listenTimeoutMs);
 
-  printf("   -v             increase verbosity. repeat for more detail\n");
+  printf("   -v             increase verbosity. repeat for more detail\n\n");
 
-  printf("For each -t argument set, the server runs 1 thread to listen for events,\n");
-  printf("and one thread to read incoming socket data\n");
+  printf("For each -t argument provided, the server runs 1 thread to listen for\n");
+  printf("TCP connections on its specified ports and one thread to read incoming\n");
+  printf("data on those same ports once connected. TCP packet payloads are assumed\n");
+  printf("to be sprintf'd integers.\n\n");
   
-  printf("\nWarning: code does not check for duplicate ports\n");
+  printf("To stop the server press CTRL-C.\n\n");
+
+  printf("Example: ./server.tsk -t 2000 -v -l enp1s0f1vf0\n");
+  printf("Listen for TCP connections on port 2000 through OS linkname enp1s0f1vf0 then echo\n");
+  printf("each TCP packet's content (assumed to be a sprintf'd integer) to stdout\n\n");
+
+  printf("Warning: code does not check for duplicate ports\n");
   exit(2);
 }
 
 void parseCommandLines(int argc, char **argv) {
   int c;
 
-  while ((c = getopt (argc, argv, "t:T:v")) != -1) {
+  while ((c = getopt (argc, argv, "l:t:T:v")) != -1) {
     switch(c) {
+      case 'l':
+      {
+        linkName = optarg;
+        break;
+      }
+
       case 't':
       {
         std::vector<int> portList;
@@ -84,7 +107,7 @@ void parseCommandLines(int argc, char **argv) {
         usageAndExit();
     }
   }
-  if (portsPerThread.empty()) {
+  if (linkName.empty() || portsPerThread.empty()) {
     usageAndExit();
   }
 }
@@ -168,16 +191,8 @@ void readEventLoop(int cpu, int eprdFid, const unsigned connectionCount, RingBuf
         readRc = read(event[i].data.fd, &sequence, sizeof(sequence));
         if (readRc!=sizeof(sequence)) {
           printf("CPU %02d read error on fid %d: %s\n", cpu, event[i].data.fd, strerror(errno));
-        }
-        if (verbose && sequence>=0) {
+        } else if (verbose) {
           printf("CPU %02d read %d\n", cpu, sequence);
-        }
-        // Is sequence last message sent by client? Then remove fid from epoll
-        if (sequence<0) {
-          ++closedConnections;
-          if (epoll_ctl(eprdFid, EPOLL_CTL_DEL, event[i].data.fd, event+i) == -1) {
-            printf("CPU %02d unable to remove poll for read ready fid %d: %s\n", cpu, event[i].data.fd, strerror(errno));
-          }
         }
       }
     }
@@ -306,6 +321,11 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
       return;
     }
 
+    if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {
+      printf("setsockopt() failed to bind socket to interface '%s': %s", linkName.c_str(), strerror(errno));
+      exit(1);
+    }
+
     // Record fid
     fid.push_back(fd);
 
@@ -347,11 +367,35 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
     close(fid[i]);
   }
 }
+
+void findLinkNameIndex() {
+  int sd;
+
+  if ((sd = socket (AF_INET, SOCK_RAW, IPPROTO_RAW)) < 0) {
+    printf("socket() failed to get socket descriptor for ioctl(): %s\n", strerror(errno));
+    exit(1);
+  }
+
+  memset (&ifr, 0, sizeof (ifr));
+  snprintf(ifr.ifr_name, linkName.length()+1, "%s", linkName.c_str());
+  if (ioctl (sd, SIOCGIFINDEX, &ifr) < 0) {
+    printf("ioctl() failed to find interface '%s': %s\n", linkName.c_str(), strerror(errno));
+    exit(1);
+  }
+
+  close(sd);
+
+  if (verbose) {
+    printf ("ioctl index for interface '%s' is %i\n", linkName.c_str(), ifr.ifr_ifindex);
+  }
+}
   
 int main(int argc, char **argv) {
   std::vector<std::thread> thread;
   
   parseCommandLines(argc, argv);
+
+  findLinkNameIndex();
 
   // Run server threads pinned to CPU 'i'
   for (unsigned i=0; i<portsPerThread.size(); ++i) {

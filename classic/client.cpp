@@ -10,29 +10,48 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #include <string>
 #include <vector>
 #include <thread>
 
-int max = 2;
 int verbose = 0;
+struct ifreq ifr;
+std::string linkName;                                                                                                   
+u_int64_t sequence = 0;
+unsigned sleepSecs = 1;
 std::vector<int> portPerThread;
 std::vector<std::string> ipAddrPerThread;
 
 void usageAndExit() {
-  printf("Usage: client -t <port>\n\n");
+  printf("Create a TCP connection then send packets with payloads consisting of a sequence numbers 1,2,...\n");
+  printf("A sleep time (default %u sec) is expended between transmitted packets. Set 0 to disable.\n\n", sleepSecs);
+
+  printf("usage: client -i <linkName> -t <port> [-s <sleepSec>]\n\n");
   printf("where:\n\n");
+
+  printf("   -l <linkName>  send packets only through named <linkName>\n");                                            
+  printf("                  run 'ip link show' or 'ifconfig' for choices\n"); 
 
   printf("   -t <ip>:<port> run thread sending data to <ip>:<port> where\n");
   printf("                  port>1024. thread is pinned to distinct CPU.\n");
   printf("                  <ip> should be in xx.xx.xx.xx format. repeat\n");
-  printf("                  -t as needed. see -N.\n");
+  printf("                  -t as needed to add more ports on their threads.\n");
   
-  printf("   -N <max>       send max>0 integers sequenced [0..max) to server\n");
-  printf("                  default %d\n", max);
+  printf("   -s <n>         sleep n>=0 seconds between transmitted packets. default\n");
+  printf("                  is %u seconds. Set 0 to disable\n", sleepSecs);
 
-  printf("   -v             print payloads sent\n\n");
+  printf("   -v             print payload\n\n");
+
+  printf("To stop the client press CTRL-C.\n\n");
+
+  printf("Example: ./client.tsk -t 192.168.0.5:2000 -v -l enp1s0f1vf0\n");
+  printf("Through the link 'enp1s0f1vf0' create a TCP connection to 192.168.0.5\n");
+  printf("port 2000 then send a TCP packet with payload 0, sleep 1 second,\n");
+  printf("then send the next TCP packet with sequence 2, and so on. A server\n");
+  printf("must be listening to on port 2000 prior to running client.\n\n");
 
   printf("Warning: code does not check for duplicate ports\n");
   exit(2);
@@ -41,8 +60,24 @@ void usageAndExit() {
 void parseCommandLines(int argc, char **argv) {
   int c;
 
-  while ((c = getopt (argc, argv, "t:N:v")) != -1) {
+  while ((c = getopt (argc, argv, "l:t:s:v")) != -1) {
     switch(c) {
+      case 'l':
+      {
+        linkName = optarg;
+        break;
+      }
+
+      case 's':
+      {
+        int i = atoi(optarg);
+        if (i<0) {
+          usageAndExit();
+        }
+        sleepSecs = (unsigned)i;
+        break;
+      }
+
       case 't':
       {
         char *del = strchr(optarg, ':');
@@ -59,16 +94,7 @@ void parseCommandLines(int argc, char **argv) {
         usageAndExit();
         break;
       }
-      case 'N':
-      {
-        int val = atoi(optarg);
-        if (val<=0) {
-          printf("invalid max %d\n", val);
-          usageAndExit();
-        }
-        max = val;
-        break;
-      }
+
       case 'v':
       {
         ++verbose;
@@ -80,7 +106,7 @@ void parseCommandLines(int argc, char **argv) {
       }
     }
   }
-  if (portPerThread.empty()) {
+  if (portPerThread.empty() || linkName.empty()) {
     usageAndExit();
   }
 }
@@ -101,6 +127,11 @@ void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
     printf("CPU %02d unable to create socket: %s\n", cpu, strerror(errno));
     return;
   }
+
+  if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {                                          
+    printf("setsockopt() failed to bind socket to interface '%s': %s", linkName.c_str(), strerror(errno));            
+    exit(1);                                                                                                          
+  }           
 
   // Setup IP address to connect to
   struct sockaddr_in addr; 
@@ -124,30 +155,49 @@ void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
     printf("CPU %02d connected to '%s:%d'\n", cpu, ipAddr.c_str(), port);
   }
 
-  // send max integers
-  int sequence(0);
-  while (++sequence<=max) {
+  while (1) {
+    ++sequence;
     rc = write(fd, &sequence, sizeof(sequence)); 
     if (rc!=sizeof(sequence)) {
       printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
     } else if (verbose) {
-      printf("CPU %02d '%s:%d' sent %d\n", cpu, ipAddr.c_str(), port, sequence);
+      printf("CPU %02d '%s:%d' sent %lu\n", cpu, ipAddr.c_str(), port, sequence);
     }
-  }
-
-  // Send -1 so server closes connection
-  sequence = -1;
-  rc = write(fd, &sequence, sizeof(sequence)); 
-  if (rc!=sizeof(sequence)) {
-    printf("CPU %02d '%s:%d' write failed: %s\n", cpu, ipAddr.c_str(), port, strerror(errno));
+    if (sleepSecs) {
+      sleep(sleepSecs);
+    }
   }
 
   // Close socket
   close(fd);
 }
+
+void findLinkNameIndex() {                                                                                              
+  int sd;                                                                                                               
+                                                                                                                        
+  if ((sd = socket (AF_INET, SOCK_RAW, IPPROTO_RAW)) < 0) {                                                             
+    printf("socket() failed to get socket descriptor for ioctl(): %s\n", strerror(errno));                              
+    exit(1);                                                                                                            
+  }                                                                                                                     
+                                                                                                                        
+  memset (&ifr, 0, sizeof (ifr));                                                                                       
+  snprintf(ifr.ifr_name, linkName.length()+1, "%s", linkName.c_str());                                                  
+  if (ioctl (sd, SIOCGIFINDEX, &ifr) < 0) {                                                                             
+    printf("ioctl() failed to find interface '%s': %s\n", linkName.c_str(), strerror(errno));                           
+    exit(1);                                                                                                            
+  }                                                                                                                     
+                                                                                                                        
+  close(sd);                                                                                                            
+                                                                                                                        
+  if (verbose) {
+    printf ("ioctl index for interface '%s' is %i\n", linkName.c_str(), ifr.ifr_ifindex);
+  }
+}
   
 int main(int argc, char **argv) {
   parseCommandLines(argc, argv);
+
+  findLinkNameIndex();                                                                                                  
 
   // Run threads pinned to CPU 'i'
   std::vector<std::thread> thread;
