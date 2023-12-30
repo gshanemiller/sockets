@@ -185,14 +185,12 @@ void readEventLoop(int cpu, int eprdFid, const unsigned connectionCount, RingBuf
     } 
 
     // process read ready events; count==0 --> timeout
-    int sequence;
+    u_int64_t sequence;
     for (int i=0; i<count; ++i) {
       if (event[i].events!=0) {
         readRc = read(event[i].data.fd, &sequence, sizeof(sequence));
-        if (readRc!=sizeof(sequence)) {
-          printf("CPU %02d read error on fid %d: %s\n", cpu, event[i].data.fd, strerror(errno));
-        } else if (verbose) {
-          printf("CPU %02d read %d\n", cpu, sequence);
+        if (readRc==sizeof(sequence)) {
+          printf("CPU %02d read %lu\n", cpu, sequence);
         }
       }
     }
