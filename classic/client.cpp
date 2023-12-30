@@ -18,10 +18,12 @@
 #include <thread>
 
 int verbose = 0;
+char data[2048];
 struct ifreq ifr;
 std::string linkName;                                                                                                   
 u_int64_t sequence = 0;
 unsigned sleepSecs = 1;
+socklen_t dataSize=2048;
 std::vector<int> portPerThread;
 std::vector<std::string> ipAddrPerThread;
 
@@ -128,10 +130,17 @@ void entryPoint(const std::string& ipAddr, const int port, const int cpu) {
     return;
   }
 
-  if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {                                          
+  if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr))!=0) {                                          
     printf("setsockopt() failed to bind socket to interface '%s': %s", linkName.c_str(), strerror(errno));            
     exit(1);                                                                                                          
   }           
+  if (getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, data, &dataSize)!=0) {
+    printf("getsockopt() failed interface '%s': %s", linkName.c_str(), strerror(errno));            
+    exit(1);                                                                                                          
+  }
+  if (verbose) {                                                                                                      
+    printf("confirmed deviceBind was '%s'\n", data);                                                                  
+  } 
 
   // Setup IP address to connect to
   struct sockaddr_in addr; 

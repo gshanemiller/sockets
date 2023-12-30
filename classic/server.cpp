@@ -19,7 +19,9 @@
 #include <ringbuffer.h>
 
 int verbose = 0;
+char data[2048];
 struct ifreq ifr;
+socklen_t dataSize = 2048;
 std::string linkName;
 int listenTimeoutMs = 60000;
 std::vector<std::vector<int>> portsPerThread;
@@ -322,6 +324,13 @@ void serverSetup(const std::vector<int>& portList, const int cpu) {
     if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {
       printf("setsockopt() failed to bind socket to interface '%s': %s", linkName.c_str(), strerror(errno));
       exit(1);
+    }
+    if (getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, data, &dataSize)!=0) {                                                
+      printf("getsockopt() failed interface '%s': %s", linkName.c_str(), strerror(errno));                                
+      exit(1);                                                                                                            
+    }
+    if (verbose) {
+      printf("confirmed deviceBind was '%s'\n", data);
     }
 
     // Record fid
